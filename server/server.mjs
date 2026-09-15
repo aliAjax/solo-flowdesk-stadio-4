@@ -51,6 +51,8 @@ function seed() {
       { id: 'coupon-early', title: '早鸟立减 ¥50', amount: 5000, quota: 10, used: 0 },
       { id: 'coupon-member', title: '会员立减 ¥20', amount: 2000, quota: 100, used: 0 },
     ],
+    // 工作人员工号白名单（角色：staff）；其余身份均为普通用户
+    staff: ['staff-01', 'staff-02'],
     seq: { lock: 1, order: 1, refund: 1 },
   };
 }
@@ -60,6 +62,7 @@ let db;
 function load() {
   try {
     db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+    if (!Array.isArray(db.staff)) db.staff = ['staff-01', 'staff-02']; // 兼容旧数据文件
   } catch {
     db = seed();
     persist();
@@ -161,8 +164,9 @@ function createLock({ showId, seatIds, owner }) {
 
 function createOrder({ lockId, owner, idempotencyKey, couponId }) {
   if (!idempotencyKey) throw httpError(400, '缺少幂等键');
-  // 幂等：同一幂等键直接返回已有订单，重复点击不会重复建单
-  const existed = db.orders.find(o => o.idempotencyKey === idempotencyKey);
+  if (!owner) throw httpError(400, '缺少用户身份');
+  // 幂等键按用户隔离：仅命中本人的历史订单，不会返回他人订单
+  const existed = db.orders.find(o => o.idempotencyKey === idempotencyKey && o.owner === owner);
   if (existed) return { order: existed, idempotent: true };
   const lock = db.locks.find(l => l.id === lockId);
   if (!lock) throw httpError(404, '锁座记录不存在');
@@ -207,9 +211,10 @@ function createOrder({ lockId, owner, idempotencyKey, couponId }) {
   return { order, idempotent: false };
 }
 
-function payOrder(orderId, result) {
+function payOrder(orderId, result, owner) {
   const order = db.orders.find(o => o.id === orderId);
   if (!order) throw httpError(404, '订单不存在');
+  if (!owner || order.owner !== owner) throw httpError(403, '无权支付他人的订单');
   if (order.status !== 'pending_payment') throw httpError(409, `订单当前状态不可支付: ${order.status}`);
   if (result === 'success') {
     for (const item of order.items) {
@@ -226,9 +231,10 @@ function payOrder(orderId, result) {
   return { order };
 }
 
-function refundOrder(orderId, seatIds) {
+function refundOrder(orderId, seatIds, owner) {
   const order = db.orders.find(o => o.id === orderId);
   if (!order) throw httpError(404, '订单不存在');
+  if (!owner || order.owner !== owner) throw httpError(403, '无权退款他人的订单');
   if (order.status !== 'paid' && order.status !== 'partially_refunded') {
     throw httpError(409, '仅已支付订单可退款');
   }
@@ -259,7 +265,11 @@ function refundOrder(orderId, seatIds) {
   return { order, refund };
 }
 
-function adminReleaseLock(lockId) {
+function adminReleaseLock(lockId, staffId) {
+  // 工作人员接口必须校验身份与角色
+  if (!staffId || !db.staff.includes(staffId)) {
+    throw httpError(403, '需要工作人员身份才能执行该操作');
+  }
   const lock = db.locks.find(l => l.id === lockId);
   if (!lock) throw httpError(404, '锁座记录不存在');
   if (lock.status === 'active') {
@@ -331,11 +341,11 @@ function route(method, url, payload) {
   if (method === 'POST' && p === '/api/locks') return createLock(payload);
   if (method === 'POST' && p === '/api/orders') return createOrder(payload);
   const pay = p.match(/^\/api\/orders\/([\w-]+)\/pay$/);
-  if (method === 'POST' && pay) return payOrder(pay[1], payload.result);
+  if (method === 'POST' && pay) return payOrder(pay[1], payload.result, payload.owner);
   const refund = p.match(/^\/api\/orders\/([\w-]+)\/refund$/);
-  if (method === 'POST' && refund) return refundOrder(refund[1], payload.seatIds || []);
+  if (method === 'POST' && refund) return refundOrder(refund[1], payload.seatIds || [], payload.owner);
   const rel = p.match(/^\/api\/admin\/locks\/([\w-]+)\/release$/);
-  if (method === 'POST' && rel) return adminReleaseLock(rel[1]);
+  if (method === 'POST' && rel) return adminReleaseLock(rel[1], payload.staffId);
   if (method === 'POST' && p === '/api/__reset' && ALLOW_RESET) {
     db = seed(); reindex(); persist();
     return { ok: true };

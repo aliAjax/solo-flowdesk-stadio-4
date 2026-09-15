@@ -18,6 +18,25 @@ async function lockSeatsViaUI(page: Page, seatIds: string[]) {
   await expect(page.getByTestId('checkout-panel')).toBeVisible();
 }
 
+/** 通过 API 为指定用户锁座并下单，返回订单。 */
+async function createOrderApi(
+  request: APIRequestContext,
+  owner: string,
+  seatId: string,
+  idempotencyKey: string,
+) {
+  const lockRes = await request.post(`${API}/api/locks`, {
+    data: { showId: 'show-1', seatIds: [seatId], owner },
+  });
+  expect(lockRes.ok()).toBeTruthy();
+  const { lock } = await lockRes.json();
+  const orderRes = await request.post(`${API}/api/orders`, {
+    data: { lockId: lock.id, owner, idempotencyKey },
+  });
+  expect(orderRes.ok()).toBeTruthy();
+  return (await orderRes.json()).order;
+}
+
 test.beforeEach(async ({ request }) => {
   await reset(request);
 });
@@ -219,9 +238,13 @@ test('工作人员可释放异常锁座，但不能操作已支付订单', async
   await expect(page.getByTestId(`protected-${paidLock.id}`)).toContainText('已支付订单，不可操作');
   await expect(page.getByTestId(`release-${paidLock.id}`)).toHaveCount(0);
 
-  // API 层同样被拒绝
-  const res = await request.post(`${API}/api/admin/locks/${paidLock.id}/release`);
-  expect(res.status()).toBe(409);
+  // API 层同样被拒绝：带工作人员身份 → 409 已支付不可操作；无身份 → 403
+  const resStaff = await request.post(`${API}/api/admin/locks/${paidLock.id}/release`, {
+    data: { staffId: 'staff-01' },
+  });
+  expect(resStaff.status()).toBe(409);
+  const resAnon = await request.post(`${API}/api/admin/locks/${paidLock.id}/release`);
+  expect(resAnon.status()).toBe(403);
 });
 
 test('刷新后座位、订单和退款状态一致', async ({ page, request }) => {
@@ -252,4 +275,103 @@ test('刷新后座位、订单和退款状态一致', async ({ page, request }) 
   await expect(page.getByTestId(`status-${orderId}`)).toContainText('部分退款');
   await expect(page.getByTestId(`refund-${s.orders[0].id && (await state(request)).orders[0].refunds[0].id}`)).toBeVisible();
   await expect(page.getByTestId(`refund-line-show-1-A区-2-1`)).toBeVisible();
+});
+
+test('跨用户支付被拒绝且订单状态不变', async ({ request }) => {
+  const order = await createOrderApi(request, 'user-A', 'show-1-A区-1-1', 'key-pay-1');
+
+  // 其他用户尝试支付 → 403
+  const res = await request.post(`${API}/api/orders/${order.id}/pay`, {
+    data: { result: 'success', owner: 'user-B' },
+  });
+  expect(res.status()).toBe(403);
+
+  // 订单状态未变
+  let s = await state(request);
+  expect(s.orders[0].status).toBe('pending_payment');
+  expect(s.seats.find((x: any) => x.id === 'show-1-A区-1-1').status).toBe('locked');
+
+  // 所有者本人支付成功
+  const ok = await request.post(`${API}/api/orders/${order.id}/pay`, {
+    data: { result: 'success', owner: 'user-A' },
+  });
+  expect(ok.ok()).toBeTruthy();
+  s = await state(request);
+  expect(s.orders[0].status).toBe('paid');
+});
+
+test('跨用户退款被拒绝且订单状态不变', async ({ request }) => {
+  const order = await createOrderApi(request, 'user-A', 'show-1-A区-1-1', 'key-refund-1');
+  await request.post(`${API}/api/orders/${order.id}/pay`, {
+    data: { result: 'success', owner: 'user-A' },
+  });
+
+  // 其他用户尝试退款 → 403
+  const res = await request.post(`${API}/api/orders/${order.id}/refund`, {
+    data: { seatIds: ['show-1-A区-1-1'], owner: 'user-B' },
+  });
+  expect(res.status()).toBe(403);
+
+  // 订单与退款记录未变
+  let s = await state(request);
+  expect(s.orders[0].status).toBe('paid');
+  expect(s.orders[0].refunds.length).toBe(0);
+  expect(s.seats.find((x: any) => x.id === 'show-1-A区-1-1').status).toBe('sold');
+
+  // 所有者本人退款成功
+  const ok = await request.post(`${API}/api/orders/${order.id}/refund`, {
+    data: { seatIds: ['show-1-A区-1-1'], owner: 'user-A' },
+  });
+  expect(ok.ok()).toBeTruthy();
+  s = await state(request);
+  expect(s.orders[0].status).toBe('refunded');
+});
+
+test('普通用户不能调用工作人员接口', async ({ request }) => {
+  const lockRes = await request.post(`${API}/api/locks`, {
+    data: { showId: 'show-1', seatIds: ['show-1-C区-1-1'], owner: 'user-A' },
+  });
+  const { lock } = await lockRes.json();
+
+  // 无身份 → 403
+  let res = await request.post(`${API}/api/admin/locks/${lock.id}/release`);
+  expect(res.status()).toBe(403);
+  // 普通用户身份 → 403
+  res = await request.post(`${API}/api/admin/locks/${lock.id}/release`, {
+    data: { staffId: 'user-A' },
+  });
+  expect(res.status()).toBe(403);
+
+  // 锁座未被释放
+  let s = await state(request);
+  expect(s.locks[0].status).toBe('active');
+
+  // 工作人员身份 → 成功
+  res = await request.post(`${API}/api/admin/locks/${lock.id}/release`, {
+    data: { staffId: 'staff-02' },
+  });
+  expect(res.ok()).toBeTruthy();
+  s = await state(request);
+  expect(s.locks[0].status).toBe('released');
+});
+
+test('幂等键按用户隔离，冲突时不返回他人订单', async ({ request }) => {
+  const KEY = 'shared-key-1';
+  const orderA = await createOrderApi(request, 'user-A', 'show-1-A区-1-1', KEY);
+
+  // 另一用户使用相同幂等键 → 创建属于自己的新订单，而非返回 user-A 的订单
+  const orderB = await createOrderApi(request, 'user-B', 'show-1-A区-1-2', KEY);
+  expect(orderB.id).not.toBe(orderA.id);
+  expect(orderB.owner).toBe('user-B');
+
+  // user-A 重复提交同键 → 返回自己的原订单，不重复建单
+  const dup = await request.post(`${API}/api/orders`, {
+    data: { lockId: 'whatever', owner: 'user-A', idempotencyKey: KEY },
+  });
+  const dupBody = await dup.json();
+  expect(dupBody.order.id).toBe(orderA.id);
+  expect(dupBody.idempotent).toBe(true);
+
+  const s = await state(request);
+  expect(s.orders.length).toBe(2);
 });

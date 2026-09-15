@@ -93,3 +93,8 @@ tr.refunded td { color: #9ca3af; text-decoration: line-through; }
   border: 1px solid #e5e7eb; border-radius: 10px; padding: 10px 14px; margin: 8px 0; font-size: 14px;
 }
 .lock-row button.danger { width: auto; padding: 6px 14px; margin-left: auto; }
+.staff-field { max-width: 360px; }
+.staff-field input {
+  display: block; width: 100%; margin-top: 4px; padding: 6px;
+  border-radius: 6px; border: 1px solid #d1d5db;
+}

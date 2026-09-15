@@ -36,19 +36,19 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ lockId, owner, idempotencyKey, couponId }),
     }),
-  pay: (orderId: string, result: 'success' | 'failure') =>
+  pay: (orderId: string, result: 'success' | 'failure', owner: string) =>
     request<{ order: import('./types').Order }>(`/api/orders/${orderId}/pay`, {
       method: 'POST',
-      body: JSON.stringify({ result }),
+      body: JSON.stringify({ result, owner }),
     }),
-  refund: (orderId: string, seatIds: string[]) =>
+  refund: (orderId: string, seatIds: string[], owner: string) =>
     request<{ order: import('./types').Order; refund: import('./types').Refund }>(
       `/api/orders/${orderId}/refund`,
-      { method: 'POST', body: JSON.stringify({ seatIds }) },
+      { method: 'POST', body: JSON.stringify({ seatIds, owner }) },
     ),
-  adminRelease: (lockId: string) =>
+  adminRelease: (lockId: string, staffId: string) =>
     request<{ lock: import('./types').Lock }>(`/api/admin/locks/${lockId}/release`, {
       method: 'POST',
-      body: '{}',
+      body: JSON.stringify({ staffId }),
     }),
 };

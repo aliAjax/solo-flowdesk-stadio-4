@@ -99,7 +99,7 @@ export default function ShowDetail() {
     setBusy(true);
     setMessage(null);
     try {
-      const { order } = await api.pay(myPendingOrder.id, result);
+      const { order } = await api.pay(myPendingOrder.id, result, owner);
       setMessage(
         result === 'success'
           ? { kind: 'ok', text: `支付成功！订单 ${order.id} 已出票` }

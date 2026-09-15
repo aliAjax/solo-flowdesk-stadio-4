@@ -5,6 +5,9 @@ import { statusText } from './ShowDetail';
 
 export default function Admin() {
   const { state, refresh } = useAppState();
+  const [staffId, setStaffId] = useState(
+    () => localStorage.getItem('ticket-staff-id') || 'staff-01',
+  );
   const [message, setMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -18,7 +21,7 @@ export default function Admin() {
     setBusy(true);
     setMessage(null);
     try {
-      await api.adminRelease(lockId);
+      await api.adminRelease(lockId, staffId);
       setMessage({ kind: 'ok', text: `锁座 ${lockId} 已释放，座位恢复可售` });
     } catch (e) {
       setMessage({ kind: 'err', text: `释放失败：${(e as Error).message}` });
@@ -34,6 +37,17 @@ export default function Admin() {
     <div>
       <h1>工作人员台</h1>
       <p className="muted">可释放异常锁座；已支付订单受保护，不可操作。</p>
+      <label className="field staff-field">
+        工作人员工号（服务端校验角色，普通用户调用将被拒绝）
+        <input
+          data-testid="staff-id-input"
+          value={staffId}
+          onChange={(e) => {
+            setStaffId(e.target.value);
+            localStorage.setItem('ticket-staff-id', e.target.value);
+          }}
+        />
+      </label>
       {message && (
         <div className={`banner ${message.kind === 'ok' ? 'success' : 'error'}`} data-testid="admin-message">
           {message.text}

@@ -33,7 +33,7 @@ export default function Orders() {
     setBusy(true);
     setMessage(null);
     try {
-      const { refund } = await api.refund(order.id, sel);
+      const { refund } = await api.refund(order.id, sel, owner);
       setMessage({
         kind: 'ok',
         text: `退款单 ${refund.id} 已生成，共退 ${fmtPrice(refund.total)}（${refund.lines.length} 个座位）`,
