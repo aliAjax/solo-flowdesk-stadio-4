@@ -1,8 +1,6 @@
 node_modules/
 dist/
+server/data.json
+.syslibs/
 test-results/
-.git-data/
-*.tsbuildinfo
-.env
-.env.*
-!.env.example
+playwright-report/

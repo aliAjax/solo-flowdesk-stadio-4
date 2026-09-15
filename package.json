@@ -1,1 +1,27 @@
-{"name":"flowdesk-studio","private":true,"version":"1.0.0","type":"module","scripts":{"dev":"vite --host 0.0.0.0","build":"tsc -b && vite build","test":"playwright test","test:ui":"playwright test --ui"},"dependencies":{"@vitejs/plugin-react":"latest","vite":"latest","typescript":"latest","react":"latest","react-dom":"latest","react-router-dom":"latest","@xyflow/react":"latest","lucide-react":"latest","zustand":"latest"},"devDependencies":{"@playwright/test":"latest","@types/react":"latest","@types/react-dom":"latest"}}
+{
+  "name": "ticket-lock-studio",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "server": "node server/server.mjs",
+    "build": "tsc -b && vite build",
+    "test": "LD_LIBRARY_PATH=/workspace/.syslibs/usr/lib/aarch64-linux-gnu:/workspace/.syslibs/lib/aarch64-linux-gnu playwright test"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-router-dom": "latest",
+    "typescript": "latest",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "@playwright/test": "latest",
+    "@types/node": "^26.5.1",
+    "@types/react": "latest",
+    "@types/react-dom": "latest"
+  }
+}
