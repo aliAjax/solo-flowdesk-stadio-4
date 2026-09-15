@@ -93,8 +93,15 @@ tr.refunded td { color: #9ca3af; text-decoration: line-through; }
   border: 1px solid #e5e7eb; border-radius: 10px; padding: 10px 14px; margin: 8px 0; font-size: 14px;
 }
 .lock-row button.danger { width: auto; padding: 6px 14px; margin-left: auto; }
-.staff-field { max-width: 360px; }
-.staff-field input {
-  display: block; width: 100%; margin-top: 4px; padding: 6px;
+.authbar { margin-left: auto; font-size: 14px; color: #4b5563; }
+.authbar a { color: #1d4ed8; }
+button.link {
+  background: none; border: none; color: #1d4ed8; cursor: pointer;
+  font-size: 14px; margin-left: 10px; text-decoration: underline;
+}
+.login-page { max-width: 380px; }
+.login-page .field input {
+  display: block; width: 100%; margin-top: 4px; padding: 8px;
   border-radius: 6px; border: 1px solid #d1d5db;
 }
+.login-page button.primary { margin-top: 8px; }

@@ -1,20 +1,28 @@
-import { useMemo, useState } from 'react';
-import { api, getOwner } from '../api';
+import { useState } from 'react';
+import { Link } from 'react-router-dom';
+import { api } from '../api';
 import { fmtCountdown, fmtPrice, seatLabel, useAppState } from '../hooks';
 import { statusText } from './ShowDetail';
 import type { Order } from '../types';
 
 export default function Orders() {
-  const { state, refresh } = useAppState();
-  const owner = useMemo(getOwner, []);
+  const { state, mine, session, refresh } = useAppState();
   const [refundSel, setRefundSel] = useState<Record<string, Set<string>>>({});
   const [message, setMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
 
   if (!state) return <div className="loading">加载中…</div>;
-  const myOrders = state.orders
-    .filter((o) => o.owner === owner)
-    .sort((a, b) => b.createdAt - a.createdAt);
+  if (!session) {
+    return (
+      <div>
+        <h1>我的订单</h1>
+        <p className="muted" data-testid="login-required">
+          请先 <Link to="/login">登录</Link> 后查看订单。
+        </p>
+      </div>
+    );
+  }
+  const myOrders = (mine?.orders ?? []).sort((a, b) => b.createdAt - a.createdAt);
 
   const toggleRefundSeat = (orderId: string, seatId: string) => {
     setRefundSel((prev) => {
@@ -33,7 +41,7 @@ export default function Orders() {
     setBusy(true);
     setMessage(null);
     try {
-      const { refund } = await api.refund(order.id, sel, owner);
+      const { refund } = await api.refund(order.id, sel);
       setMessage({
         kind: 'ok',
         text: `退款单 ${refund.id} 已生成，共退 ${fmtPrice(refund.total)}（${refund.lines.length} 个座位）`,

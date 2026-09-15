@@ -1,17 +1,38 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api } from './api';
-import type { AppState } from './types';
+import { api, getSession, type Session } from './api';
+import type { AppState, Lock, Order } from './types';
 
-/** 轮询全局状态：每 intervalMs 拉取一次，页面重新聚焦时立即拉取。 */
-export function useAppState(intervalMs = 2000) {
+export interface AppData {
+  state: AppState | null;
+  mine: { locks: Lock[]; orders: Order[] } | null;
+  session: Session | null;
+  error: string | null;
+  refresh: () => Promise<void>;
+}
+
+/** 轮询全局公开状态；登录后同时拉取本人锁座与订单。页面聚焦时立即刷新。 */
+export function useAppState(intervalMs = 2000): AppData {
   const [state, setState] = useState<AppState | null>(null);
+  const [mine, setMine] = useState<AppData['mine']>(null);
+  const [session, setSession] = useState<Session | null>(() => getSession());
   const [error, setError] = useState<string | null>(null);
   const timer = useRef<number | undefined>(undefined);
 
   const refresh = useCallback(async () => {
+    const s = getSession();
+    setSession(s);
     try {
-      const s = await api.state();
-      setState(s);
+      const pub = await api.state();
+      setState(pub);
+      if (s) {
+        try {
+          setMine(await api.myState());
+        } catch {
+          setMine(null); // 会话失效时公开状态仍可用
+        }
+      } else {
+        setMine(null);
+      }
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -29,13 +50,7 @@ export function useAppState(intervalMs = 2000) {
     };
   }, [refresh, intervalMs]);
 
-  return { state, error, refresh };
-}
-
-/** 每秒触发的倒计时（目标时间戳，毫秒）。返回剩余毫秒，不为负。 */
-export function useCountdown(targetMs: number | null | undefined, now: number | undefined) {
-  if (!targetMs || !now) return 0;
-  return Math.max(0, targetMs - now);
+  return { state, mine, session, error, refresh };
 }
 
 export function fmtCountdown(ms: number): string {

@@ -1,53 +1,87 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { fmtCountdown, fmtPrice, seatLabel, useAppState } from '../hooks';
 import { statusText } from './ShowDetail';
+import type { Lock, Order } from '../types';
 
 export default function Admin() {
-  const { state, refresh } = useAppState();
-  const [staffId, setStaffId] = useState(
-    () => localStorage.getItem('ticket-staff-id') || 'staff-01',
-  );
+  const { state, session, refresh } = useAppState();
+  const [adminData, setAdminData] = useState<{ locks: Lock[]; orders: Order[] } | null>(null);
+  const [forbidden, setForbidden] = useState(false);
   const [message, setMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
 
-  if (!state) return <div className="loading">加载中…</div>;
+  const loadAdmin = useCallback(async () => {
+    if (!session || session.user.role !== 'staff') {
+      setAdminData(null);
+      setForbidden(!!session);
+      return;
+    }
+    try {
+      setAdminData(await api.adminState());
+      setForbidden(false);
+    } catch {
+      setAdminData(null);
+      setForbidden(true);
+    }
+  }, [session]);
 
-  const activeLocks = state.locks.filter((l) => l.status === 'active');
-  const convertedLocks = state.locks.filter((l) => l.status === 'converted');
+  useEffect(() => {
+    void loadAdmin();
+    const t = window.setInterval(() => void loadAdmin(), 2000);
+    return () => window.clearInterval(t);
+  }, [loadAdmin]);
+
+  if (!state) return <div className="loading">加载中…</div>;
+  if (!session) {
+    return (
+      <div>
+        <h1>工作人员台</h1>
+        <p className="muted" data-testid="login-required">
+          请先以工作人员账号 <Link to="/login">登录</Link>。
+        </p>
+      </div>
+    );
+  }
+  if (forbidden) {
+    return (
+      <div>
+        <h1>工作人员台</h1>
+        <div className="banner error" data-testid="forbidden">
+          当前账号 {session.user.id} 不是工作人员，无权访问。
+        </div>
+      </div>
+    );
+  }
+  if (!adminData) return <div className="loading">加载中…</div>;
+
+  const activeLocks = adminData.locks.filter((l) => l.status === 'active');
+  const convertedLocks = adminData.locks.filter((l) => l.status === 'converted');
 
   const release = async (lockId: string) => {
     if (busy) return;
     setBusy(true);
     setMessage(null);
     try {
-      await api.adminRelease(lockId, staffId);
+      await api.adminRelease(lockId);
       setMessage({ kind: 'ok', text: `锁座 ${lockId} 已释放，座位恢复可售` });
     } catch (e) {
       setMessage({ kind: 'err', text: `释放失败：${(e as Error).message}` });
     } finally {
       setBusy(false);
-      await refresh();
+      await Promise.all([refresh(), loadAdmin()]);
     }
   };
 
-  const lockOrder = (lockId: string) => state.orders.find((o) => o.lockId === lockId);
+  const lockOrder = (lockId: string) => adminData.orders.find((o) => o.lockId === lockId);
 
   return (
     <div>
       <h1>工作人员台</h1>
-      <p className="muted">可释放异常锁座；已支付订单受保护，不可操作。</p>
-      <label className="field staff-field">
-        工作人员工号（服务端校验角色，普通用户调用将被拒绝）
-        <input
-          data-testid="staff-id-input"
-          value={staffId}
-          onChange={(e) => {
-            setStaffId(e.target.value);
-            localStorage.setItem('ticket-staff-id', e.target.value);
-          }}
-        />
-      </label>
+      <p className="muted">
+        当前工作人员：{session.user.id}。可释放异常锁座；已支付订单受保护，不可操作。
+      </p>
       {message && (
         <div className={`banner ${message.kind === 'ok' ? 'success' : 'error'}`} data-testid="admin-message">
           {message.text}

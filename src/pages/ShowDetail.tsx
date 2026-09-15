@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
-import { api, getOwner } from '../api';
+import { Link, useParams } from 'react-router-dom';
+import { api } from '../api';
 import { fmtCountdown, fmtPrice, seatLabel, useAppState } from '../hooks';
 import type { Seat } from '../types';
 
 export default function ShowDetail() {
   const { showId = '' } = useParams();
-  const { state, refresh } = useAppState();
-  const owner = useMemo(getOwner, []);
+  const { state, mine, session, refresh } = useAppState();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [couponId, setCouponId] = useState<string>('');
   const [message, setMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
@@ -27,14 +26,12 @@ export default function ShowDetail() {
     () => (state?.seats ?? []).filter((s) => s.showId === showId),
     [state, showId],
   );
-  const myLock = state?.locks.find(
-    (l) => l.showId === showId && l.owner === owner && l.status === 'active',
+  const myLock = mine?.locks.find((l) => l.showId === showId && l.status === 'active');
+  const myPendingOrder = mine?.orders.find(
+    (o) => o.showId === showId && o.status === 'pending_payment',
   );
-  const myPendingOrder = state?.orders.find(
-    (o) => o.showId === showId && o.owner === owner && o.status === 'pending_payment',
-  );
-  const lastOrder = state?.orders
-    .filter((o) => o.showId === showId && o.owner === owner)
+  const lastOrder = mine?.orders
+    .filter((o) => o.showId === showId)
     .sort((a, b) => b.createdAt - a.createdAt)[0];
 
   // 锁座消失（超时/被释放）时清理本地选择
@@ -60,7 +57,7 @@ export default function ShowDetail() {
     setBusy(true);
     setMessage(null);
     try {
-      await api.createLock(showId, [...selected], owner);
+      await api.createLock(showId, [...selected]);
       idemKey.current = crypto.randomUUID();
       setMessage({ kind: 'ok', text: '锁座成功，请在倒计时结束前提交订单' });
       setSelected(new Set());
@@ -83,7 +80,7 @@ export default function ShowDetail() {
     setMessage(null);
     try {
       if (!idemKey.current) idemKey.current = crypto.randomUUID();
-      const { order } = await api.createOrder(myLock.id, owner, idemKey.current, couponId || null);
+      const { order } = await api.createOrder(myLock.id, idemKey.current, couponId || null);
       setMessage({ kind: 'ok', text: `订单 ${order.id} 已创建，请在限时内完成支付` });
     } catch (e) {
       setMessage({ kind: 'err', text: `下单失败：${(e as Error).message}` });
@@ -99,7 +96,7 @@ export default function ShowDetail() {
     setBusy(true);
     setMessage(null);
     try {
-      const { order } = await api.pay(myPendingOrder.id, result, owner);
+      const { order } = await api.pay(myPendingOrder.id, result);
       setMessage(
         result === 'success'
           ? { kind: 'ok', text: `支付成功！订单 ${order.id} 已出票` }
@@ -185,6 +182,11 @@ export default function ShowDetail() {
           {!myLock && !myPendingOrder && (
             <div data-testid="select-panel">
               <h3>已选座位（{selected.size}）</h3>
+              {!session && (
+                <p className="muted" data-testid="login-required">
+                  请先 <Link to="/login">登录</Link> 后选座下单。
+                </p>
+              )}
               {selectedSeats.length === 0 && <p className="muted">点击座位图选择座位，可多选。</p>}
               <ul className="pick-list">
                 {selectedSeats.map((s) => (
@@ -195,7 +197,7 @@ export default function ShowDetail() {
               <button
                 className="primary"
                 data-testid="lock-button"
-                disabled={selected.size === 0 || busy}
+                disabled={selected.size === 0 || busy || !session}
                 onClick={lockSeats}
               >
                 锁定座位

@@ -1,6 +1,8 @@
 // 演出票务锁座与分账台 —— 后端服务（零依赖）
 // 原子性：Node 单线程，所有变更在同步临界区内完成，请求之间不会交错。
 // 持久化：每次变更后写穿到 JSON 文件，重启/刷新后状态一致。
+// 身份：登录后签发不可预测的会话令牌（crypto.randomBytes），
+//       所有写操作与私有查询的身份一律取自服务端会话，不接受客户端自报。
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -10,6 +12,7 @@ const PORT = Number(process.env.PORT || 4180);
 const DB_FILE = process.env.TICKET_DB || path.join(path.dirname(new URL(import.meta.url).pathname), 'data.json');
 const LOCK_TTL_MS = Number(process.env.TICKET_LOCK_TTL_MS || 120_000);
 const PAY_TTL_MS = Number(process.env.TICKET_PAY_TTL_MS || 180_000);
+const SESSION_TTL_MS = Number(process.env.TICKET_SESSION_TTL_MS || 8 * 3600_000);
 const ALLOW_RESET = process.env.ALLOW_RESET === '1';
 
 // ---------- 数据种子 ----------
@@ -51,8 +54,16 @@ function seed() {
       { id: 'coupon-early', title: '早鸟立减 ¥50', amount: 5000, quota: 10, used: 0 },
       { id: 'coupon-member', title: '会员立减 ¥20', amount: 2000, quota: 100, used: 0 },
     ],
-    // 工作人员工号白名单（角色：staff）；其余身份均为普通用户
-    staff: ['staff-01', 'staff-02'],
+    // 账号与角色（演示环境使用明文口令）
+    users: [
+      { id: 'alice', password: 'alice123', role: 'user' },
+      { id: 'bob', password: 'bob123', role: 'user' },
+      { id: 'admin', password: 'admin123', role: 'staff' },
+      ...Array.from({ length: 10 }, (_, i) => ({
+        id: `user${i + 1}`, password: 'pass123', role: 'user',
+      })),
+    ],
+    sessions: [], // {token, userId, role, expiresAt}
     seq: { lock: 1, order: 1, refund: 1 },
   };
 }
@@ -62,7 +73,7 @@ let db;
 function load() {
   try {
     db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-    if (!Array.isArray(db.staff)) db.staff = ['staff-01', 'staff-02']; // 兼容旧数据文件
+    if (!Array.isArray(db.users)) db = seed(); // 旧格式数据文件直接重建
   } catch {
     db = seed();
     persist();
@@ -99,7 +110,55 @@ function sweep(now = Date.now()) {
       dirty = true;
     }
   }
+  const before = db.sessions.length;
+  db.sessions = db.sessions.filter(s => s.expiresAt > now);
+  if (db.sessions.length !== before) dirty = true;
   if (dirty) persist();
+}
+
+// ---------- 会话 ----------
+function newToken() {
+  return crypto.randomBytes(24).toString('base64url'); // 不可预测
+}
+
+function login({ username, password }) {
+  const user = db.users.find(u => u.id === username);
+  if (!user || user.password !== password) throw httpError(401, '用户名或密码错误');
+  const session = {
+    token: newToken(), userId: user.id, role: user.role,
+    expiresAt: Date.now() + SESSION_TTL_MS,
+  };
+  db.sessions.push(session);
+  persist();
+  return { token: session.token, user: { id: user.id, role: user.role }, expiresAt: session.expiresAt };
+}
+
+function logout(session) {
+  db.sessions = db.sessions.filter(s => s.token !== session.token);
+  persist();
+  return { ok: true };
+}
+
+/** 从请求头解析会话；缺失、伪造、过期一律返回 null。 */
+function sessionFrom(req) {
+  const h = req.headers['authorization'] || '';
+  const m = /^Bearer ([A-Za-z0-9_-]+)$/.exec(h);
+  if (!m) return null;
+  const s = db.sessions.find(x => x.token === m[1]);
+  if (!s || s.expiresAt <= Date.now()) return null;
+  return s;
+}
+
+function requireUser(req) {
+  const s = sessionFrom(req);
+  if (!s) throw httpError(401, '未登录或会话已失效');
+  return s;
+}
+
+function requireStaff(req) {
+  const s = requireUser(req);
+  if (s.role !== 'staff') throw httpError(403, '需要工作人员角色');
+  return s;
 }
 
 // 释放订单占有的座位与优惠名额（支付失败 / 支付超时 / 工作人员释放）
@@ -133,8 +192,9 @@ function allocateDiscount(items, discount) {
   return alloc;
 }
 
-// ---------- 业务操作（全部同步、原子） ----------
-function createLock({ showId, seatIds, owner }) {
+// ---------- 业务操作（全部同步、原子；身份取自会话） ----------
+function createLock(session, { showId, seatIds }) {
+  const owner = session.userId;
   if (!Array.isArray(seatIds) || seatIds.length === 0) throw httpError(400, '未选择座位');
   // 同一用户、同一座位集合的活跃锁 → 幂等返回（防重复点击）
   const dup = db.locks.find(l => l.status === 'active' && l.owner === owner
@@ -162,9 +222,9 @@ function createLock({ showId, seatIds, owner }) {
   return { lock, idempotent: false };
 }
 
-function createOrder({ lockId, owner, idempotencyKey, couponId }) {
+function createOrder(session, { lockId, idempotencyKey, couponId }) {
+  const owner = session.userId;
   if (!idempotencyKey) throw httpError(400, '缺少幂等键');
-  if (!owner) throw httpError(400, '缺少用户身份');
   // 幂等键按用户隔离：仅命中本人的历史订单，不会返回他人订单
   const existed = db.orders.find(o => o.idempotencyKey === idempotencyKey && o.owner === owner);
   if (existed) return { order: existed, idempotent: true };
@@ -211,10 +271,10 @@ function createOrder({ lockId, owner, idempotencyKey, couponId }) {
   return { order, idempotent: false };
 }
 
-function payOrder(orderId, result, owner) {
+function payOrder(session, orderId, result) {
   const order = db.orders.find(o => o.id === orderId);
   if (!order) throw httpError(404, '订单不存在');
-  if (!owner || order.owner !== owner) throw httpError(403, '无权支付他人的订单');
+  if (order.owner !== session.userId) throw httpError(403, '无权支付他人的订单');
   if (order.status !== 'pending_payment') throw httpError(409, `订单当前状态不可支付: ${order.status}`);
   if (result === 'success') {
     for (const item of order.items) {
@@ -231,10 +291,10 @@ function payOrder(orderId, result, owner) {
   return { order };
 }
 
-function refundOrder(orderId, seatIds, owner) {
+function refundOrder(session, orderId, seatIds) {
   const order = db.orders.find(o => o.id === orderId);
   if (!order) throw httpError(404, '订单不存在');
-  if (!owner || order.owner !== owner) throw httpError(403, '无权退款他人的订单');
+  if (order.owner !== session.userId) throw httpError(403, '无权退款他人的订单');
   if (order.status !== 'paid' && order.status !== 'partially_refunded') {
     throw httpError(409, '仅已支付订单可退款');
   }
@@ -265,11 +325,7 @@ function refundOrder(orderId, seatIds, owner) {
   return { order, refund };
 }
 
-function adminReleaseLock(lockId, staffId) {
-  // 工作人员接口必须校验身份与角色
-  if (!staffId || !db.staff.includes(staffId)) {
-    throw httpError(403, '需要工作人员身份才能执行该操作');
-  }
+function adminReleaseLock(session, lockId) {
   const lock = db.locks.find(l => l.id === lockId);
   if (!lock) throw httpError(404, '锁座记录不存在');
   if (lock.status === 'active') {
@@ -303,17 +359,32 @@ function httpError(status, message, extra = {}) {
   return Object.assign(new Error(message), { status, extra });
 }
 
-function view() {
+/** 公开状态：不含任何订单、锁座归属等身份信息。 */
+function publicView() {
   return {
     now: Date.now(),
     shows: db.shows,
-    seats: db.seats,
-    locks: db.locks,
-    orders: db.orders,
+    seats: db.seats.map(s => ({
+      id: s.id, showId: s.showId, area: s.area, row: s.row, no: s.no,
+      tier: s.tier, price: s.price, status: s.status,
+    })),
     coupons: db.coupons,
     lockTtlMs: LOCK_TTL_MS,
     payTtlMs: PAY_TTL_MS,
   };
+}
+
+/** 本人私有状态：仅当前会话用户的锁座与订单。 */
+function myView(session) {
+  return {
+    locks: db.locks.filter(l => l.owner === session.userId),
+    orders: db.orders.filter(o => o.owner === session.userId),
+  };
+}
+
+/** 工作人员视图：全量锁座与订单。 */
+function adminView() {
+  return { locks: db.locks, orders: db.orders };
 }
 
 const server = http.createServer((req, res) => {
@@ -325,7 +396,7 @@ const server = http.createServer((req, res) => {
       sweep();
       const url = new URL(req.url, 'http://x');
       const payload = body ? JSON.parse(body) : {};
-      const out = route(req.method, url, payload);
+      const out = route(req, req.method, url, payload);
       res.statusCode = 200;
       res.end(JSON.stringify(out));
     } catch (e) {
@@ -335,24 +406,41 @@ const server = http.createServer((req, res) => {
   });
 });
 
-function route(method, url, payload) {
+function route(req, method, url, payload) {
   const p = url.pathname;
-  if (method === 'GET' && p === '/api/state') return view();
-  if (method === 'POST' && p === '/api/locks') return createLock(payload);
-  if (method === 'POST' && p === '/api/orders') return createOrder(payload);
+
+  // 公开
+  if (method === 'GET' && p === '/api/state') return publicView();
+  if (method === 'POST' && p === '/api/login') return login(payload);
+
+  // 需要登录
+  if (method === 'POST' && p === '/api/logout') return logout(requireUser(req));
+  if (method === 'GET' && p === '/api/my/state') return myView(requireUser(req));
+  if (method === 'POST' && p === '/api/locks') return createLock(requireUser(req), payload);
+  if (method === 'POST' && p === '/api/orders') return createOrder(requireUser(req), payload);
   const pay = p.match(/^\/api\/orders\/([\w-]+)\/pay$/);
-  if (method === 'POST' && pay) return payOrder(pay[1], payload.result, payload.owner);
+  if (method === 'POST' && pay) return payOrder(requireUser(req), pay[1], payload.result);
   const refund = p.match(/^\/api\/orders\/([\w-]+)\/refund$/);
-  if (method === 'POST' && refund) return refundOrder(refund[1], payload.seatIds || [], payload.owner);
+  if (method === 'POST' && refund) return refundOrder(requireUser(req), refund[1], payload.seatIds || []);
+
+  // 需要工作人员角色（角色取自服务端会话，客户端自报字段无效）
+  if (method === 'GET' && p === '/api/admin/state') return adminView(requireStaff(req));
   const rel = p.match(/^\/api\/admin\/locks\/([\w-]+)\/release$/);
-  if (method === 'POST' && rel) return adminReleaseLock(rel[1], payload.staffId);
-  if (method === 'POST' && p === '/api/__reset' && ALLOW_RESET) {
+  if (method === 'POST' && rel) return adminReleaseLock(requireStaff(req), rel[1]);
+
+  // 测试钩子
+  if (ALLOW_RESET && method === 'POST' && p === '/api/__reset') {
     db = seed(); reindex(); persist();
+    return { ok: true };
+  }
+  if (ALLOW_RESET && method === 'POST' && p === '/api/__expire') {
+    const s = db.sessions.find(x => x.token === payload.token);
+    if (s) { s.expiresAt = 0; persist(); }
     return { ok: true };
   }
   throw httpError(404, 'Not Found');
 }
 
 server.listen(PORT, () => {
-  console.log(`ticket server on http://127.0.0.1:${PORT} (lockTtl=${LOCK_TTL_MS}ms payTtl=${PAY_TTL_MS}ms db=${DB_FILE})`);
+  console.log(`ticket server on http://127.0.0.1:${PORT} (lockTtl=${LOCK_TTL_MS}ms payTtl=${PAY_TTL_MS}ms sessionTtl=${SESSION_TTL_MS}ms db=${DB_FILE})`);
 });

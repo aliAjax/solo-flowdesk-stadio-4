@@ -24,8 +24,6 @@ export interface Seat {
   tier: string;
   price: number; // 分
   status: SeatStatus;
-  lockId: string | null;
-  orderId: string | null;
 }
 
 export interface Lock {
@@ -97,8 +95,6 @@ export interface AppState {
   now: number;
   shows: Show[];
   seats: Seat[];
-  locks: Lock[];
-  orders: Order[];
   coupons: Coupon[];
   lockTtlMs: number;
   payTtlMs: number;
